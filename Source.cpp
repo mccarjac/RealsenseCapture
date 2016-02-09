@@ -3,6 +3,7 @@
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/core/core.hpp>
+#include <opencv2/stitching.hpp>
 
 //Realsense RSSDK Inclues
 #include <pxcsession.h>
@@ -23,6 +24,7 @@ using namespace ci;
 using namespace ci::app;
 //#include <GLFW/glfw3.h>
 //#include <thread>
+#include <vector>
 
 struct dubCam
 {
@@ -30,12 +32,40 @@ struct dubCam
 	PXCCapture::DeviceInfo two;
 };
 
-dubCam getDeviceInfo(PXCSenseManager * mySenseMan);
-void CaptureDeviceStream(PXCSenseManager * sm, PXCSenseManager * sm2, PXCCapture::DeviceInfo dev1, PXCCapture::DeviceInfo dev2, pxcCHAR * file, pxcCHAR * file2);
-void pxcToMat(PXCImage * img,Mat* myCV);
+struct pxcDust
+{
+	PXCImage * pxcOne;
+	PXCImage * pxcTwo;
+};
 
-UtilRender *renderColor = new UtilRender(L"COLOR STREAM");
-UtilRender *renderColor2 = new UtilRender(L"COLOR STREAM");
+struct myMats
+{
+	cv::Mat one;
+	cv::Mat two;
+};
+
+struct myConversion
+{
+	IplImage *image;
+	PXCImage::ImageData data;
+	PXCImage::ImageData info;
+	unsigned char * rgbData;
+	cv::Mat cvImage;
+	int height, width, rotAngle;
+	cv::Mat rotMat;
+
+};
+
+CvSize gab_size;
+
+
+dubCam getDeviceInfo(PXCSenseManager * mySenseMan);
+void CaptureDeviceStream(PXCSenseManager * sm, PXCSenseManager * sm2, PXCImage * color, PXCImage * color2, pxcDust * combo, PXCCapture::Sample * mySample);
+int configStreams(PXCSenseManager * senseMan, PXCSenseManager * sm2, PXCCapture::DeviceInfo dev1, PXCCapture::DeviceInfo dev2, pxcCHAR * file, pxcCHAR * file2);
+void pxcToMat(pxcDust * imgsToConvert, myMats * convertedImages, myConversion * one, myConversion * two);
+int renderImages(myMats * imgs);
+//UtilRender *renderColor = new UtilRender(L"COLOR STREAM");
+//UtilRender *renderColor2 = new UtilRender(L"COLOR STREAM");
 
 void main()
 {
@@ -46,17 +76,37 @@ char c;
 PXCSenseManager *sm = PXCSenseManager::CreateInstance();
 PXCSenseManager *sm2 = PXCSenseManager::CreateInstance();
 
-struct dubCam currentDevices;
-//Lets get our current devices that are plugged in
+dubCam currentDevices;
 currentDevices = getDeviceInfo(sm);
 
 pxcCHAR * firstCam = L"C:/Users/Group34/Desktop/cam1.rssdk";
 pxcCHAR * secCam = L"C:/Users/Group34/Desktop/cam2.rssdk";
 
-//For now we just capture the RGB streams from each camera but can easily add functionalities to mess with depth and IR
-CaptureDeviceStream(sm,sm2, currentDevices.one,currentDevices.two, firstCam,secCam);
+myMats cvImages;
+PXCImage* color = 0, *color2 = 0;
+pxcDust myPXCs = {};
+
+if (configStreams(sm, sm2, currentDevices.one, currentDevices.two, firstCam, secCam) != 0) wprintf_s(L"Error initializing\n");
 
 
+myConversion camOne = {}, camTwo = {};
+//Universal conversion info///
+gab_size.height = 480;
+gab_size.width = 640;
+
+camOne.image = cvCreateImage(gab_size, 8, 3);
+camTwo.image = cvCreateImage(gab_size, 8, 3);
+
+myMats convertedImages = {};
+PXCCapture::Sample * samp = 0;
+for (;;)
+{
+	
+	CaptureDeviceStream(sm, sm2,color,color2,&myPXCs,samp);
+	pxcToMat(&myPXCs,&convertedImages,&camOne,&camTwo);
+	if (renderImages(&convertedImages) != 0) break;
+
+}
 
 
 //Keep our session alive as long as we are accessing modules within it
@@ -105,118 +155,100 @@ dubCam getDeviceInfo(PXCSenseManager * mySenseMan)
 		}
 		captureOne->Release();
 	}
+	
 	myCameras.one = camOne;
 	myCameras.two = camTwo;
 	return myCameras;//camOne, camTwo;
 
 }
 
-void CaptureDeviceStream(PXCSenseManager * senseMan, PXCSenseManager * sm2, PXCCapture::DeviceInfo dev1, PXCCapture::DeviceInfo dev2, pxcCHAR * file, pxcCHAR * file2)
+void CaptureDeviceStream(PXCSenseManager * senseMan, PXCSenseManager * sm2, PXCImage * color, PXCImage * color2, pxcDust * combo, PXCCapture::Sample * mySample)
 {
 	//PXCImage::Rotation rotatedImage;
-	
+		if (senseMan->AcquireFrame(false) < PXC_STATUS_NO_ERROR)throw(0);
+		mySample = senseMan->QuerySample();
+		color = mySample->color;
 
-	PXCImage * color, *color2;
-	PXCCaptureManager * cm = senseMan->QueryCaptureManager();
-	//PXCCaptureManager * cm2 = sm2->QueryCaptureManager();
-	
-	cm->SetFileName(file, false);
-	//cm2->SetFileName(file2, false);
-	
-	senseMan->EnableStream(PXCCapture::STREAM_TYPE_COLOR, 640, 480, 0);
-	//sm2->EnableStream(PXCCapture::STREAM_TYPE_COLOR, 640, 480, 0);
+		if (sm2->AcquireFrame(false) < PXC_STATUS_NO_ERROR)throw(0);
+		mySample = sm2->QuerySample();
+		color2 = mySample->color;
 		
-	cm->FilterByDeviceInfo(&dev1);
-	//cm2->FilterByDeviceInfo(&dev2);
-	
-	senseMan->Init();
-	sm2->Init();
-	
-	for (int i = 0; i < 1000; i++)
-	{
-	
-		if (senseMan->AcquireFrame(false) < PXC_STATUS_NO_ERROR)break;
-		PXCCapture::Sample * sample = senseMan->QuerySample();
-		color = sample->color;
-
-	/*	if (sm2->AcquireFrame(true) < PXC_STATUS_NO_ERROR)break;
-		PXCCapture::Sample * sample2 = sm2->QuerySample();
-		color2 = sample2->color;
-		*/
-		cv::Mat matOne, matTwo;
-		//CONVERT PXCImage to OpenCV Mat format...
-		pxcToMat(color, &matOne);
+		combo->pxcOne = color;
+		combo->pxcTwo = color2;
 
 		senseMan->ReleaseFrame();
 		sm2->ReleaseFrame();
-	}
-
 	
 }
 
-void pxcToMat(PXCImage * img,Mat* myCV)
+void pxcToMat(pxcDust * imgsToConvert, myMats * convertedImages, myConversion * one, myConversion * two)
 {
-
-	IplImage * image = 0;
-	CvSize gab_size;
-	gab_size.height = 480;
-	gab_size.width = 640;
 	
-	image = cvCreateImage(gab_size, 8, 3);
 
-	PXCImage::ImageData data;
-	PXCImage::ImageInfo rgbInfo;
-	unsigned char *rgbData;
+	
+	imgsToConvert->pxcOne->AcquireAccess(PXCImage::ACCESS_READ,PXCImage::PIXEL_FORMAT_RGB24, &one->data);
+	imgsToConvert->pxcTwo->AcquireAccess(PXCImage::ACCESS_READ, PXCImage::PIXEL_FORMAT_RGB24, &two->data);
 
-	img->AcquireAccess(PXCImage::ACCESS_READ,PXCImage::PIXEL_FORMAT_RGB24, &data);
-
-	rgbData = data.planes[0];
-
+	one->rgbData = one->data.planes[0];
+	two->rgbData = two->data.planes[0];
 	for (int y = 0; y < 480; y++ )
 		{
 			for (int x = 0; x < 640;x++)
 				{
 					for (int k = 0; k < 3; k++)
 					{
-						image->imageData[y * 640 * 3 + x * 3 + k] = rgbData[y * 640 * 3 + x * 3 + k];
+						one->image->imageData[y * 640 * 3 + x * 3 + k] = one->rgbData[y * 640 * 3 + x * 3 + k];
+						two->image->imageData[y * 640 * 3 + x * 3 + k] = two->rgbData[y * 640 * 3 + x * 3 + k];
+
 					}
 			}
 	}
-	img->ReleaseAccess(&data);
+	imgsToConvert->pxcOne->ReleaseAccess(&one->data);
+	imgsToConvert->pxcTwo->ReleaseAccess(&two->data);
+	one->cvImage = cv::cvarrToMat(one->image);
+	one->height = one->cvImage.rows/ 2.;
+	one->width = one->cvImage.cols/ 2.;
+	one->rotAngle = 180;
+	one->rotMat = getRotationMatrix2D(Point(one->width, one->height), (one->rotAngle), 1);
+	cv::warpAffine(one->cvImage, one->cvImage, one->rotMat, one->cvImage.size());
+	two->cvImage = cv::cvarrToMat(two->image);
 	
-	cv::Mat newImage = cv::cvarrToMat(image);
-	cv::imshow("camOne", newImage);
-	if (cvWaitKey(10)>= 0)
-	{
-		throw(0);
-	}
-
-	/*	cinder::gl::Texture mLabelMap, mLabelMap2;
-	IplImage * imageOne = cvCreateImageHeader(cvSize(640, 480), 8, 3);
-	IplImage * imageTwo = cvCreateImageHeader(cvSize(640, 480), 8, 3);
+	convertedImages->one = one->cvImage;
+	convertedImages->two = two->cvImage;
 		
-	cvSetData(imageOne, (uchar*)dat1.planes[0], 640 * 3 * sizeof(uchar));
-	cvSetData(imageTwo, (uchar*)dat2.planes[0], 640 * 3 * sizeof(uchar));
+}
 
-	cv::Mat newImageOne = cv::cvarrToMat(imageOne);
-	cv::Mat newImageTwo = cv::cvarrToMat(imageTwo);
-	cv::imwrite("C:/Users/Group34/Desktop/pleaseBeMe.jpg",newImageOne);
+int configStreams(PXCSenseManager * senseMan, PXCSenseManager * sm2, PXCCapture::DeviceInfo dev1, PXCCapture::DeviceInfo dev2, pxcCHAR * file, pxcCHAR * file2)
+{
+
+	PXCCaptureManager * cm = senseMan->QueryCaptureManager();
+	PXCCaptureManager * cm2 = sm2->QueryCaptureManager();
+
+	cm->SetFileName(file, false);
+	cm2->SetFileName(file2, false);
+
+	senseMan->EnableStream(PXCCapture::STREAM_TYPE_COLOR, 640, 480, 0);
+	sm2->EnableStream(PXCCapture::STREAM_TYPE_COLOR, 640, 480, 0);
+
+	cm->FilterByDeviceInfo(&dev1);
+	cm2->FilterByDeviceInfo(&dev2);
+
+	senseMan->Init();
+	sm2->Init();
+
+	return 0;
+
+}
+
+int renderImages(myMats * imgs)
+{
+		
+	cv::imshow("camOne", imgs->one);
+	cv::imshow("camTwo", imgs->two);
+	if (cvWaitKey(10) >= 0)
+	{
+	throw(0);
+	}
 	
-	mLabelMap = cinder::gl::Texture(fromOcv(newImageOne));
-	mLabelMap2 = cinder::gl::Texture(fromOcv(newImageOne));
-	
-	float w1 = mLabelMap.getWidth();
-	float h1 = mLabelMap.getHeight();
-	float w2 = mLabelMap2.getWidth();
-	float h2 = mLabelMap2.getHeight();
-
-	gl::draw(mLabelMap, Rectf(0, 0, 200,200));
-	gl::draw(mLabelMap2, Rectf(0, 0, 200, 200));
-
-	cv::namedWindow("Cam One", WINDOW_AUTOSIZE);
-	cv::namedWindow("Cam Two", WINDOW_AUTOSIZE);
-	wprintf_s(L"Didn't show em bra\n");
-	cv::imshow("Cam One", newImageOne);
-	cv::imshow("Cam Two", newImageTwo);
-	waitKey(0);	*/
+	return 0;
 }
